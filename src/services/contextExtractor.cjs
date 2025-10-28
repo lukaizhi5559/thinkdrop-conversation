@@ -59,7 +59,9 @@ class ContextExtractor {
         {
           headers: {
             'Content-Type': 'application/json',
-            'X-API-Key': this.phi4ApiKey
+            'Authorization': this.phi4ApiKey,  // MCP protocol uses Authorization header
+            'X-Service-Name': 'conversation-service',
+            'X-Request-ID': requestId
           },
           timeout: 5000 // 5 second timeout
         }
