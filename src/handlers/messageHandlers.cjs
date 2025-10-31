@@ -7,6 +7,7 @@
 const { query, run, getConnection } = require('../database/connection.cjs');
 const { customAlphabet } = require('nanoid');
 const ContextHandler = require('./contextHandler.cjs');
+const { storeMessageEmbedding } = require('./semanticSearchHandler.cjs');
 
 const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 12);
 
@@ -100,6 +101,12 @@ async function addMessage(payload) {
         }
       }
     }
+
+    // Generate embedding asynchronously (non-blocking)
+    storeMessageEmbedding(messageId, text).catch(error => {
+      console.warn('⚠️ [MESSAGE] Embedding generation failed:', error.message);
+      // Don't fail the message add if embedding fails
+    });
 
     return {
       messageId,

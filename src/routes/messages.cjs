@@ -6,6 +6,7 @@
 const express = require('express');
 const { validateMCPRequest, createMCPResponse } = require('../middleware/validation.cjs');
 const messageHandlers = require('../handlers/messageHandlers.cjs');
+const semanticSearchHandler = require('../handlers/semanticSearchHandler.cjs');
 
 const router = express.Router();
 
@@ -31,6 +32,17 @@ router.post('/message.list', async (req, res) => {
     res.json(createMCPResponse(requestId, 'message.list', true, result));
   } catch (error) {
     res.status(500).json(createMCPResponse(req.mcpRequest.requestId, 'message.list', false, null, error.message));
+  }
+});
+
+// Message semantic search
+router.post('/message.search', async (req, res) => {
+  try {
+    const { requestId, payload } = req.mcpRequest;
+    const result = await semanticSearchHandler.searchMessages(payload);
+    res.json(createMCPResponse(requestId, 'message.search', true, result));
+  } catch (error) {
+    res.status(500).json(createMCPResponse(req.mcpRequest.requestId, 'message.search', false, null, error.message));
   }
 });
 
