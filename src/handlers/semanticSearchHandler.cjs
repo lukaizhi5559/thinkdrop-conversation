@@ -33,7 +33,7 @@ async function generateEmbedding(text) {
       {
         headers: {
           'Content-Type': 'application/json',
-          'X-API-Key': PHI4_API_KEY
+          'Authorization': PHI4_API_KEY
         }
       }
     );

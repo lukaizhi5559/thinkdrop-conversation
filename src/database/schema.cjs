@@ -45,7 +45,8 @@ async function createSchema(connection) {
         role TEXT NOT NULL,
         content TEXT NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        metadata TEXT
+        metadata TEXT,
+        embedding DOUBLE[]
       )
     `;
     

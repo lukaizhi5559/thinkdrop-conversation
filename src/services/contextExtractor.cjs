@@ -9,8 +9,8 @@ const crypto = require('crypto');
 class ContextExtractor {
   constructor() {
     // Phi4 service configuration
-    this.phi4Endpoint = process.env.MCP_PHI4_ENDPOINT || 'http://localhost:3003';
-    this.phi4ApiKey = process.env.MCP_PHI4_API_KEY || 'auto-generated-key-phi4';
+    this.phi4Endpoint = process.env.PHI4_ENDPOINT || 'http://localhost:3003';
+    this.phi4ApiKey = process.env.PHI4_API_KEY || 'auto-generated-key-phi4';
     
     // Fact extraction patterns (lightweight fallback for simple cases)
     this.quickFactPatterns = [
