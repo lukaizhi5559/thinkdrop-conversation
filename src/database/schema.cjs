@@ -62,26 +62,10 @@ async function createSchema(connection) {
       )
     `;
     
-    // Create session_entities table for entity tracking
-    const createEntitiesSQL = `
-      CREATE TABLE IF NOT EXISTS session_entities (
-        id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        entity_type TEXT NOT NULL,
-        entity_value TEXT NOT NULL,
-        first_mentioned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        last_mentioned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        mention_count INTEGER DEFAULT 1,
-        metadata TEXT DEFAULT '{}'
-      )
-    `;
-    
     // Create indexes for better query performance
     const createIndexesSQL = `
       CREATE INDEX IF NOT EXISTS idx_session_context_session ON session_context(session_id);
       CREATE INDEX IF NOT EXISTS idx_session_context_type ON session_context(context_type);
-      CREATE INDEX IF NOT EXISTS idx_session_entities_session ON session_entities(session_id);
-      CREATE INDEX IF NOT EXISTS idx_session_entities_type ON session_entities(entity_type);
     `;
     
     // Execute all CREATE TABLE statements
@@ -109,21 +93,14 @@ async function createSchema(connection) {
               return reject(err);
             }
             
-            connection.exec(createEntitiesSQL, (err) => {
+            connection.exec(createIndexesSQL, (err) => {
               if (err) {
-                console.error('❌ [SCHEMA] Failed to create session_entities:', err);
+                console.error('❌ [SCHEMA] Failed to create indexes:', err);
                 return reject(err);
               }
               
-              connection.exec(createIndexesSQL, (err) => {
-                if (err) {
-                  console.error('❌ [SCHEMA] Failed to create indexes:', err);
-                  return reject(err);
-                }
-                
-                console.log('✅ [SCHEMA] All conversation tables and indexes created successfully');
-                resolve();
-              });
+              console.log('✅ [SCHEMA] All conversation tables and indexes created successfully');
+              resolve();
             });
           });
         });

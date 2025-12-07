@@ -79,6 +79,37 @@ async function addMessage(payload) {
       [messageId, sessionId, text, sender, timestamp, JSON.stringify(metadata)]
     );
 
+    // ✅ STEP 3: Verify message was persisted
+    const verification = await query(
+      `SELECT id FROM conversation_messages WHERE id = ?`,
+      [messageId]
+    );
+    
+    if (verification.length === 0) {
+      console.error('❌ [MESSAGE] CRITICAL: Message not found after insert! Retrying...');
+      
+      // Retry once
+      await run(
+        `INSERT INTO conversation_messages (id, session_id, content, role, created_at, metadata)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [messageId, sessionId, text, sender, timestamp, JSON.stringify(metadata)]
+      );
+      
+      // Verify again
+      const retryVerification = await query(
+        `SELECT id FROM conversation_messages WHERE id = ?`,
+        [messageId]
+      );
+      
+      if (retryVerification.length === 0) {
+        throw new Error('CRITICAL: Message persistence failed after retry!');
+      }
+      
+      console.log('✅ [MESSAGE] Message persisted after retry');
+    } else {
+      console.log('✅ [MESSAGE] Message persistence verified:', messageId);
+    }
+
     // Update session message count and last activity
     await run(
       `UPDATE conversation_sessions 

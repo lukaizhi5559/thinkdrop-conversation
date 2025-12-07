@@ -15,9 +15,31 @@ const messageRoutes = require('./routes/messages.cjs');
 const { createContextRoutes } = require('./routes/contextRoutes.cjs');
 const ContextHandler = require('./handlers/contextHandler.cjs');
 const { authenticateRequest } = require('./middleware/auth.cjs');
+const { exec } = require('child_process');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3004;
+
+// Backup function
+function backupDatabase() {
+  const backupScript = path.join(__dirname, '../../../scripts/backup-conversation-db.sh');
+  
+  exec(backupScript, (error, stdout, stderr) => {
+    if (error) {
+      console.error('❌ [BACKUP] Failed to create backup:', error.message);
+      return;
+    }
+    if (stderr) {
+      console.warn('⚠️  [BACKUP] Backup warning:', stderr);
+    }
+    console.log(stdout);
+  });
+}
+
+// Schedule periodic backups every 5 minutes
+const BACKUP_INTERVAL = 5 * 60 * 1000; // 5 minutes
+let backupInterval = null;
 
 // Middleware
 app.use(cors());
@@ -53,9 +75,7 @@ app.get('/info', (req, res) => {
       'message.delete',
       'context.add',
       'context.get',
-      'context.extract',
-      'entity.add',
-      'entity.list'
+      'context.extract'
     ]
   });
 });
@@ -108,6 +128,14 @@ async function start() {
       console.log('║   MCP Protocol: v1                                    ║');
       console.log('╚═══════════════════════════════════════════════════════╝\n');
       
+      // Start periodic backups
+      console.log('💾 [BACKUP] Starting periodic backups (every 5 minutes)...');
+      backupInterval = setInterval(backupDatabase, BACKUP_INTERVAL);
+      
+      // Create initial backup
+      console.log('💾 [BACKUP] Creating initial backup...');
+      backupDatabase();
+      
       console.log('Available endpoints:');
       console.log('  Session Management:');
       console.log('    - POST /session.create       (Create new session)');
@@ -126,8 +154,6 @@ async function start() {
       console.log('    - POST /context.add          (Add session context)');
       console.log('    - POST /context.get          (Get session context)');
       console.log('    - POST /context.extract      (Extract context from text)');
-      console.log('    - POST /entity.add           (Add session entity)');
-      console.log('    - POST /entity.list          (List session entities)');
       console.log('  Service Info:');
       console.log('    - GET  /health               (Health check)');
       console.log('    - GET  /info                 (Service capabilities)\n');
@@ -139,3 +165,40 @@ async function start() {
 }
 
 start();
+
+// Graceful shutdown with final backup
+process.on('SIGINT', async () => {
+  console.log('\n🛑 [CONVERSATION-SERVICE] Shutting down gracefully...');
+  
+  // Stop periodic backups
+  if (backupInterval) {
+    clearInterval(backupInterval);
+    console.log('✅ [BACKUP] Stopped periodic backups');
+  }
+  
+  // Create final backup before shutdown
+  console.log('💾 [BACKUP] Creating final backup before shutdown...');
+  backupDatabase();
+  
+  // Wait a bit for backup to complete
+  setTimeout(() => {
+    console.log('👋 [CONVERSATION-SERVICE] Goodbye!');
+    process.exit(0);
+  }, 2000);
+});
+
+process.on('SIGTERM', async () => {
+  console.log('\n🛑 [CONVERSATION-SERVICE] Received SIGTERM, shutting down...');
+  
+  // Stop periodic backups
+  if (backupInterval) {
+    clearInterval(backupInterval);
+  }
+  
+  // Create final backup
+  backupDatabase();
+  
+  setTimeout(() => {
+    process.exit(0);
+  }, 2000);
+});
