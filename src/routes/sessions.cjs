@@ -67,6 +67,17 @@ router.post('/session.delete', async (req, res) => {
   }
 });
 
+// Session get active
+router.post('/session.getActive', async (req, res) => {
+  try {
+    const { requestId } = req.mcpRequest;
+    const result = await sessionHandlers.getActiveSession();
+    res.json(createMCPResponse(requestId, 'session.getActive', true, result));
+  } catch (error) {
+    res.status(500).json(createMCPResponse(req.mcpRequest.requestId, 'session.getActive', false, null, error.message));
+  }
+});
+
 // Session switch
 router.post('/session.switch', async (req, res) => {
   try {

@@ -4,26 +4,11 @@
  * Ported from ConversationSessionAgent.cjs
  */
 
-const { query, run, getConnection } = require('../database/connection.cjs');
+const { query, run } = require('../database/connection.cjs');
 const { customAlphabet } = require('nanoid');
-const ContextHandler = require('./contextHandler.cjs');
 const { storeMessageEmbedding } = require('./semanticSearchHandler.cjs');
 
 const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 12);
-
-// Initialize context handler (lazy initialization)
-let contextHandler = null;
-function getContextHandler() {
-  if (!contextHandler) {
-    try {
-      const db = getConnection();
-      contextHandler = new ContextHandler(db);
-    } catch (error) {
-      console.warn('⚠️ [MESSAGE] Context handler not available:', error.message);
-    }
-  }
-  return contextHandler;
-}
 
 /**
  * Add a message to a session
@@ -119,19 +104,6 @@ async function addMessage(payload) {
        WHERE id = ?`,
       [timestamp, timestamp, sessionId]
     );
-
-    // Auto-extract context if user message
-    if (sender === 'user') {
-      const handler = getContextHandler();
-      if (handler) {
-        try {
-          await handler.extractAndStore(text, sessionId, messageId);
-        } catch (error) {
-          console.warn('⚠️ [MESSAGE] Context extraction failed:', error.message);
-          // Don't fail the message add if extraction fails
-        }
-      }
-    }
 
     // Generate embedding asynchronously (non-blocking)
     storeMessageEmbedding(messageId, text).catch(error => {

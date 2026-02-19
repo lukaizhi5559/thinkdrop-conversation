@@ -11,8 +11,8 @@ let db = null;
 let connection = null;
 
 async function initializeDatabase() {
-  // Conversation service has its own dedicated database
-  const dbPath = path.join(__dirname, '../../../../data/conversation.duckdb');
+  // Store database locally within this MCP service
+  const dbPath = path.join(__dirname, '../../data/conversation.duckdb');
   
   return new Promise((resolve, reject) => {
     try {

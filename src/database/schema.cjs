@@ -1,24 +1,19 @@
 /**
  * Database Schema
  * Creates conversation tables for the conversation service
+ * Tables: conversation_sessions, conversation_messages
  */
 
 async function createSchema(connection) {
   return new Promise((resolve, reject) => {
-    // Create conversation_sessions table
+    // Create conversation_sessions table (slimmed down)
     const createSessionsSQL = `
       CREATE TABLE IF NOT EXISTS conversation_sessions (
         id TEXT PRIMARY KEY,
         type TEXT DEFAULT 'user-initiated',
         title TEXT,
-        trigger_reason TEXT,
-        trigger_confidence DOUBLE DEFAULT 0.0,
         context_data TEXT DEFAULT '{}',
-        related_memories TEXT DEFAULT '[]',
-        current_activity TEXT DEFAULT '{}',
         is_active BOOLEAN DEFAULT false,
-        is_hibernated BOOLEAN DEFAULT false,
-        hibernation_data TEXT DEFAULT '{}',
         message_count INTEGER DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -26,18 +21,7 @@ async function createSchema(connection) {
       )
     `;
     
-    // Create session_context table (no foreign key constraints - DuckDB limitation)
-    const createContextSQL = `
-      CREATE TABLE IF NOT EXISTS session_context (
-        id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        context_type TEXT,
-        context_data TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `;
-    
-    // Create conversation_messages table (no foreign key constraints - DuckDB limitation)
+    // Create conversation_messages table
     const createMessagesSQL = `
       CREATE TABLE IF NOT EXISTS conversation_messages (
         id TEXT PRIMARY KEY,
@@ -50,58 +34,46 @@ async function createSchema(connection) {
       )
     `;
     
-    // Create session_message_chunks table (no foreign key constraints - DuckDB limitation)
-    const createChunksSQL = `
-      CREATE TABLE IF NOT EXISTS session_message_chunks (
-        id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        message_id TEXT NOT NULL,
-        chunk_index INTEGER,
-        chunk_text TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `;
-    
     // Create indexes for better query performance
     const createIndexesSQL = `
-      CREATE INDEX IF NOT EXISTS idx_session_context_session ON session_context(session_id);
-      CREATE INDEX IF NOT EXISTS idx_session_context_type ON session_context(context_type);
+      CREATE INDEX IF NOT EXISTS idx_messages_session ON conversation_messages(session_id);
+      CREATE INDEX IF NOT EXISTS idx_messages_created ON conversation_messages(created_at);
     `;
     
-    // Execute all CREATE TABLE statements
+    // Drop legacy tables that are no longer used
+    const dropLegacySQL = `
+      DROP TABLE IF EXISTS session_message_chunks;
+      DROP TABLE IF EXISTS session_entities;
+      DROP TABLE IF EXISTS session_context;
+    `;
+    
+    // Execute all statements
     connection.exec(createSessionsSQL, (err) => {
       if (err) {
         console.error('❌ [SCHEMA] Failed to create conversation_sessions:', err);
         return reject(err);
       }
       
-      connection.exec(createContextSQL, (err) => {
+      connection.exec(createMessagesSQL, (err) => {
         if (err) {
-          console.error('❌ [SCHEMA] Failed to create session_context:', err);
+          console.error('❌ [SCHEMA] Failed to create conversation_messages:', err);
           return reject(err);
         }
         
-        connection.exec(createMessagesSQL, (err) => {
+        connection.exec(createIndexesSQL, (err) => {
           if (err) {
-            console.error('❌ [SCHEMA] Failed to create conversation_messages:', err);
+            console.error('❌ [SCHEMA] Failed to create indexes:', err);
             return reject(err);
           }
           
-          connection.exec(createChunksSQL, (err) => {
+          connection.exec(dropLegacySQL, (err) => {
             if (err) {
-              console.error('❌ [SCHEMA] Failed to create session_message_chunks:', err);
-              return reject(err);
+              console.warn('⚠️ [SCHEMA] Failed to drop legacy tables:', err.message);
+              // Non-fatal — continue anyway
             }
             
-            connection.exec(createIndexesSQL, (err) => {
-              if (err) {
-                console.error('❌ [SCHEMA] Failed to create indexes:', err);
-                return reject(err);
-              }
-              
-              console.log('✅ [SCHEMA] All conversation tables and indexes created successfully');
-              resolve();
-            });
+            console.log('✅ [SCHEMA] Tables and indexes ready');
+            resolve();
           });
         });
       });

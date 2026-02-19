@@ -16,11 +16,7 @@ async function createSession(payload) {
   const {
     sessionType = 'user-initiated',
     title = 'New Chat Session',
-    triggerReason = 'manual',
-    triggerConfidence = 0.0,
-    contextData = {},
-    relatedMemories = [],
-    currentActivity = {}
+    contextData = {}
   } = payload;
 
   const sessionId = `session_${Date.now()}_${nanoid()}`;
@@ -33,24 +29,16 @@ async function createSession(payload) {
     // Insert new session
     await run(
       `INSERT INTO conversation_sessions (
-        id, type, title, trigger_reason, trigger_confidence,
-        context_data, related_memories, current_activity,
-        is_active, is_hibernated, hibernation_data, message_count,
+        id, type, title, context_data, is_active, message_count,
         created_at, updated_at, last_activity_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         sessionId,
         sessionType,
         title,
-        triggerReason,
-        triggerConfidence,
         JSON.stringify(contextData),
-        JSON.stringify(relatedMemories),
-        JSON.stringify(currentActivity),
-        true, // is_active
-        false, // is_hibernated
-        '{}', // hibernation_data
-        0, // message_count
+        true,
+        0,
         now,
         now,
         now
@@ -63,13 +51,8 @@ async function createSession(payload) {
         id: sessionId,
         type: sessionType,
         title,
-        triggerReason,
-        triggerConfidence,
         contextData,
-        relatedMemories,
-        currentActivity,
         isActive: true,
-        isHibernated: false,
         messageCount: 0,
         createdAt: now,
         updatedAt: now,
@@ -89,18 +72,12 @@ async function listSessions(payload) {
   const {
     limit = 50,
     offset = 0,
-    includeHibernated = false,
     sortBy = 'last_activity_at',
     sortOrder = 'DESC'
   } = payload;
 
   try {
-    let sql = `SELECT * FROM conversation_sessions WHERE 1=1`;
-
-    if (!includeHibernated) {
-      sql += ` AND is_hibernated = false`;
-    }
-
+    let sql = `SELECT * FROM conversation_sessions`;
     sql += ` ORDER BY ${sortBy} ${sortOrder} LIMIT ? OFFSET ?`;
 
     const sessions = await query(sql, [limit, offset]);
@@ -134,20 +111,13 @@ async function listSessions(payload) {
           id: session.id,
           type: session.type,
           title: session.title,
-          triggerReason: session.trigger_reason,
-          triggerConfidence: session.trigger_confidence,
           contextData: JSON.parse(session.context_data || '{}'),
-          relatedMemories: JSON.parse(session.related_memories || '[]'),
-          currentActivity: JSON.parse(session.current_activity || '{}'),
-          hibernationData: JSON.parse(session.hibernation_data || '{}'),
           isActive: session.is_active,
-          isHibernated: session.is_hibernated,
           messageCount: parseInt(messageCount) || 0,
           createdAt: session.created_at,
           updatedAt: session.updated_at,
           lastActivityAt: lastMessageTime || session.last_activity_at || session.created_at,
-          lastMessage: lastMessage,
-          unreadCount: 0
+          lastMessage: lastMessage
         };
       })
     );
@@ -197,14 +167,8 @@ async function getSession(payload) {
         id: session.id,
         type: session.type,
         title: session.title,
-        triggerReason: session.trigger_reason,
-        triggerConfidence: session.trigger_confidence,
         contextData: JSON.parse(session.context_data || '{}'),
-        relatedMemories: JSON.parse(session.related_memories || '[]'),
-        currentActivity: JSON.parse(session.current_activity || '{}'),
-        hibernationData: JSON.parse(session.hibernation_data || '{}'),
         isActive: session.is_active,
-        isHibernated: session.is_hibernated,
         messageCount: parseInt(messageCount) || 0,
         createdAt: session.created_at,
         updatedAt: session.updated_at,
@@ -221,7 +185,7 @@ async function getSession(payload) {
  * Update a session
  */
 async function updateSession(payload) {
-  const { sessionId, title, contextData, relatedMemories, currentActivity } = payload;
+  const { sessionId, title, contextData } = payload;
 
   if (!sessionId) {
     throw new Error('sessionId is required');
@@ -238,14 +202,6 @@ async function updateSession(payload) {
     if (contextData !== undefined) {
       updates.push('context_data = ?');
       params.push(JSON.stringify(contextData));
-    }
-    if (relatedMemories !== undefined) {
-      updates.push('related_memories = ?');
-      params.push(JSON.stringify(relatedMemories));
-    }
-    if (currentActivity !== undefined) {
-      updates.push('current_activity = ?');
-      params.push(JSON.stringify(currentActivity));
     }
 
     if (updates.length === 0) {
@@ -293,6 +249,24 @@ async function deleteSession(payload) {
 }
 
 /**
+ * Get active session
+ */
+async function getActiveSession() {
+  try {
+    const sessions = await query(`SELECT id FROM conversation_sessions WHERE is_active = true LIMIT 1`);
+    
+    if (!sessions || sessions.length === 0) {
+      return { success: true, sessionId: null };
+    }
+    
+    return { success: true, sessionId: sessions[0].id };
+  } catch (error) {
+    console.error('❌ [SESSION] Get active failed:', error);
+    throw error;
+  }
+}
+
+/**
  * Switch active session
  */
 async function switchSession(payload) {
@@ -322,5 +296,6 @@ module.exports = {
   getSession,
   updateSession,
   deleteSession,
+  getActiveSession,
   switchSession
 };
