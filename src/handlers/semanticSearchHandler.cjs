@@ -7,7 +7,7 @@ const { query } = require('../database/connection.cjs');
 const axios = require('axios');
 
 // PHI4 service endpoint for embeddings
-const PHI4_ENDPOINT = process.env.PHI4_ENDPOINT || 'http://127.0.0.1:3003';
+const PHI4_ENDPOINT = process.env.PHI4_ENDPOINT || 'http://127.0.0.1:3009';
 const PHI4_API_KEY = process.env.PHI4_API_KEY;
 
 /**
@@ -33,7 +33,7 @@ async function generateEmbedding(text) {
       {
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': PHI4_API_KEY
+          'Authorization': `Bearer ${PHI4_API_KEY}`
         }
       }
     );
