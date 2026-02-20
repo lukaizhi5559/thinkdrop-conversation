@@ -15,6 +15,7 @@ async function createSchema(connection) {
         context_data TEXT DEFAULT '{}',
         is_active BOOLEAN DEFAULT false,
         message_count INTEGER DEFAULT 0,
+        topic_embedding DOUBLE[],
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         last_activity_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP

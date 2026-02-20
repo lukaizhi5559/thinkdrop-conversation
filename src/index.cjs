@@ -13,6 +13,7 @@ const { initializeDatabase } = require('./database/connection.cjs');
 const sessionRoutes = require('./routes/sessions.cjs');
 const messageRoutes = require('./routes/messages.cjs');
 const { authenticateRequest } = require('./middleware/auth.cjs');
+const { startPurgeTimer, stopPurgeTimer, initEmbedder } = require('./handlers/sessionRouter.cjs');
 
 const app = express();
 const PORT = process.env.PORT || 3004;
@@ -45,6 +46,7 @@ app.get('/info', (req, res) => {
       'session.delete',
       'session.getActive',
       'session.switch',
+      'session.route',
       'message.add',
       'message.list',
       'message.get',
@@ -80,10 +82,18 @@ async function start() {
     
     await initializeDatabase();
     console.log('✅ [CONVERSATION-SERVICE] Database initialized');
+
+    // Start stale session purge timer (every 30 min)
+    startPurgeTimer();
+
+    // Pre-load DistilBert embedder in background (non-blocking)
+    initEmbedder().catch(err => {
+      console.warn('⚠️ [CONVERSATION-SERVICE] Embedder pre-load failed:', err.message);
+    });
     
     app.listen(PORT, () => {
       console.log(`\n✅ [CONVERSATION-SERVICE] Running on port ${PORT}`);
-      console.log('   Endpoints: session.{create,list,get,update,delete,getActive,switch}');
+      console.log('   Endpoints: session.{create,list,get,update,delete,getActive,switch,route}');
       console.log('   Endpoints: message.{add,list,get,update,delete,search}');
       console.log('   Service:   GET /health, GET /info\n');
     });
@@ -98,9 +108,11 @@ start();
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\n🛑 [CONVERSATION-SERVICE] Shutting down...');
+  stopPurgeTimer();
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
+  stopPurgeTimer();
   process.exit(0);
 });

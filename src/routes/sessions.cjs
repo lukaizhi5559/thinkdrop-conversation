@@ -6,6 +6,7 @@
 const express = require('express');
 const { validateMCPRequest, createMCPResponse } = require('../middleware/validation.cjs');
 const sessionHandlers = require('../handlers/sessionHandlers.cjs');
+const { routeMessage } = require('../handlers/sessionRouter.cjs');
 
 const router = express.Router();
 
@@ -86,6 +87,17 @@ router.post('/session.switch', async (req, res) => {
     res.json(createMCPResponse(requestId, 'session.switch', true, result));
   } catch (error) {
     res.status(500).json(createMCPResponse(req.mcpRequest.requestId, 'session.switch', false, null, error.message));
+  }
+});
+
+// Session route — auto-match or create session based on message content
+router.post('/session.route', async (req, res) => {
+  try {
+    const { requestId, payload } = req.mcpRequest;
+    const result = await routeMessage(payload);
+    res.json(createMCPResponse(requestId, 'session.route', true, result));
+  } catch (error) {
+    res.status(500).json(createMCPResponse(req.mcpRequest.requestId, 'session.route', false, null, error.message));
   }
 });
 

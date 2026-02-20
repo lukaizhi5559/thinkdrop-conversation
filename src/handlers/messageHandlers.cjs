@@ -7,6 +7,7 @@
 const { query, run } = require('../database/connection.cjs');
 const { customAlphabet } = require('nanoid');
 const { storeMessageEmbedding } = require('./semanticSearchHandler.cjs');
+const { updateSessionTopicEmbedding } = require('./sessionRouter.cjs');
 
 const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 12);
 
@@ -105,10 +106,14 @@ async function addMessage(payload) {
       [timestamp, timestamp, sessionId]
     );
 
-    // Generate embedding asynchronously (non-blocking)
+    // Generate message embedding asynchronously (non-blocking, uses Phi4)
     storeMessageEmbedding(messageId, text).catch(error => {
       console.warn('⚠️ [MESSAGE] Embedding generation failed:', error.message);
-      // Don't fail the message add if embedding fails
+    });
+
+    // Update session topic embedding asynchronously (non-blocking, uses local DistilBert)
+    updateSessionTopicEmbedding(sessionId, text).catch(error => {
+      console.warn('⚠️ [MESSAGE] Topic embedding update failed:', error.message);
     });
 
     return {
