@@ -101,4 +101,30 @@ router.post('/session.route', async (req, res) => {
   }
 });
 
+// Context get — returns context_data for a session (called by retrieveMemory node)
+router.post('/context.get', async (req, res) => {
+  try {
+    const { requestId, payload } = req.mcpRequest;
+    const { sessionId } = payload || {};
+
+    if (!sessionId) {
+      return res.json(createMCPResponse(requestId, 'context.get', true, { context: {} }));
+    }
+
+    const { query } = require('../database/connection.cjs');
+    const sessions = await query(
+      `SELECT context_data FROM conversation_sessions WHERE id = ?`,
+      [sessionId]
+    );
+
+    const context = sessions.length > 0
+      ? JSON.parse(sessions[0].context_data || '{}')
+      : {};
+
+    res.json(createMCPResponse(requestId, 'context.get', true, { sessionId, context }));
+  } catch (error) {
+    res.status(500).json(createMCPResponse(req.mcpRequest?.requestId, 'context.get', false, null, error.message));
+  }
+});
+
 module.exports = router;
