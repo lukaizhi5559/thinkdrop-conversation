@@ -16,8 +16,14 @@ let embedder = null;
 let embedderLoading = false;
 
 // Configurable threshold for session matching
-const SIMILARITY_THRESHOLD = parseFloat(process.env.SESSION_SIMILARITY_THRESHOLD || '0.50');
+// 0.75 prevents false matches between semantically similar but contextually different prompts
+// (e.g. "scan screenshots folder" and "scan thinkdrop-backend" both score ~0.55 on folder/scan topics)
+const SIMILARITY_THRESHOLD = parseFloat(process.env.SESSION_SIMILARITY_THRESHOLD || '0.75');
 const STALE_DAYS = parseInt(process.env.SESSION_STALE_DAYS || '30', 10);
+// Sessions older than this many ms require a higher similarity to match — avoids
+// cross-session contamination when the user starts a new unrelated task hours later
+const RECENCY_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
+const STALE_SESSION_SIMILARITY = parseFloat(process.env.STALE_SESSION_SIMILARITY || '0.90');
 
 /**
  * Initialize the local DistilBert embedder
@@ -209,6 +215,7 @@ async function routeMessage(payload) {
     // 3. Find the best matching session
     let bestMatch = null;
     let bestSimilarity = 0;
+    const now = Date.now();
 
     for (const session of sessions) {
       if (!session.topic_embedding) continue;
@@ -224,7 +231,12 @@ async function routeMessage(payload) {
 
       const similarity = cosineSimilarity(messageEmbedding, topicVec);
 
-      if (similarity > bestSimilarity) {
+      // Apply a higher threshold for sessions that haven't been active recently —
+      // a 2-hour-old "scan folder" session shouldn't absorb a new unrelated folder scan.
+      const sessionAge = now - new Date(session.last_activity_at).getTime();
+      const effectiveThreshold = sessionAge > RECENCY_THRESHOLD_MS ? STALE_SESSION_SIMILARITY : threshold;
+
+      if (similarity > bestSimilarity && similarity >= effectiveThreshold) {
         bestSimilarity = similarity;
         bestMatch = session;
       }

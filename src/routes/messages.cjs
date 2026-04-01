@@ -35,6 +35,17 @@ router.post('/message.list', async (req, res) => {
   }
 });
 
+// Message list by date range (cross-session)
+router.post('/message.listByDate', async (req, res) => {
+  try {
+    const { requestId, payload } = req.mcpRequest;
+    const result = await messageHandlers.listMessagesByDate(payload);
+    res.json(createMCPResponse(requestId, 'message.listByDate', true, result));
+  } catch (error) {
+    res.status(500).json(createMCPResponse(req.mcpRequest.requestId, 'message.listByDate', false, null, error.message));
+  }
+});
+
 // Message semantic search
 router.post('/message.search', async (req, res) => {
   try {

@@ -308,9 +308,56 @@ async function deleteMessage(payload) {
   }
 }
 
+/**
+ * List messages across all sessions within a date range (cross-session history query)
+ */
+async function listMessagesByDate(payload) {
+  const {
+    startDate,
+    endDate,
+    limit = 50,
+    userId
+  } = payload;
+
+  if (!startDate || !endDate) {
+    throw new Error('startDate and endDate are required');
+  }
+
+  try {
+    const messages = await query(
+      `SELECT cm.id, cm.session_id, cm.content, cm.role, cm.created_at, cm.metadata
+       FROM conversation_messages cm
+       WHERE cm.created_at >= ? AND cm.created_at <= ?
+       ORDER BY cm.created_at ASC
+       LIMIT ?`,
+      [startDate, endDate, limit]
+    );
+
+    const parsedMessages = messages.map(msg => ({
+      id: msg.id,
+      sessionId: msg.session_id,
+      text: msg.content,
+      sender: msg.role,
+      timestamp: msg.created_at,
+      metadata: JSON.parse(msg.metadata || '{}')
+    }));
+
+    return {
+      messages: parsedMessages,
+      count: parsedMessages.length,
+      startDate,
+      endDate
+    };
+  } catch (error) {
+    console.error('❌ [MESSAGE] listByDate failed:', error);
+    throw error;
+  }
+}
+
 module.exports = {
   addMessage,
   listMessages,
+  listMessagesByDate,
   getMessage,
   updateMessage,
   deleteMessage
