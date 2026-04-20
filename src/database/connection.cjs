@@ -10,30 +10,61 @@ const { createSchema } = require('./schema.cjs');
 let db = null;
 let connection = null;
 
-async function initializeDatabase() {
-  // Store database locally within this MCP service
-  const dbPath = path.join(__dirname, '../../data/conversation.duckdb');
-  
+const MAX_RETRIES = 5;
+const RETRY_DELAY_MS = 3000;
+
+/**
+ * Single connection attempt — rejects immediately on any error.
+ */
+async function _tryConnect(dbPath) {
   return new Promise((resolve, reject) => {
     try {
-      db = new duckdb.Database(dbPath);
-      console.log('✅ [DB] Connected to database:', dbPath);
-      
-      connection = db.connect();
-      console.log('✅ [DB] Connection established');
-      
-      // Create schema for conversation tables
-      createSchema(connection)
-        .then(() => {
-          console.log('✅ [DB] Schema verified');
+      const instance = new duckdb.Database(dbPath, (err) => {
+        if (err) return reject(err);
+
+        try {
+          const conn = instance.connect();
+          db = instance;
+          connection = conn;
+          console.log('✅ [DB] Connected to database:', dbPath);
           resolve();
-        })
-        .catch(reject);
+        } catch (connErr) {
+          reject(connErr);
+        }
+      });
+
+      // duckdb.Database constructor may throw synchronously on some builds
+      if (!instance) reject(new Error('duckdb.Database returned falsy'));
     } catch (err) {
-      console.error('❌ [DB] Failed to initialize:', err);
       reject(err);
     }
   });
+}
+
+async function initializeDatabase() {
+  // Store database locally within this MCP service
+  const dbPath = path.join(__dirname, '../../data/conversation.duckdb');
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      await _tryConnect(dbPath);
+
+      // Create schema for conversation tables
+      await createSchema(connection);
+      console.log('✅ [DB] Schema verified');
+      return;
+    } catch (err) {
+      const isLockError = err.message && err.message.includes('Could not set lock');
+      if (isLockError && attempt < MAX_RETRIES) {
+        const delay = RETRY_DELAY_MS * attempt;
+        console.warn(`⚠️ [DB] Database locked (attempt ${attempt}/${MAX_RETRIES}) — retrying in ${delay / 1000}s...`);
+        await new Promise(r => setTimeout(r, delay));
+      } else {
+        console.error('❌ [DB] Failed to initialize after retries:', err.message);
+        throw err;
+      }
+    }
+  }
 }
 
 function getConnection() {
