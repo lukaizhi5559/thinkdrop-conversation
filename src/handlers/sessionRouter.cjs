@@ -24,6 +24,12 @@ const STALE_DAYS = parseInt(process.env.SESSION_STALE_DAYS || '30', 10);
 // cross-session contamination when the user starts a new unrelated task hours later
 const RECENCY_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
 const STALE_SESSION_SIMILARITY = parseFloat(process.env.STALE_SESSION_SIMILARITY || '0.90');
+// When a hintSessionId is provided (from the prior turn), use a lower similarity bar
+// for short messages (≤ 6 words) to treat them as follow-ups.
+// The caller (logConversation) passes the previous turn's resolved session as a hint.
+const HINT_RECENCY_MS = parseInt(process.env.HINT_RECENCY_MS || String(5 * 60 * 1000), 10); // 5 minutes
+const HINT_SHORT_MESSAGE_WORDS = 6; // messages ≤ this many words are treated as potential follow-ups
+const HINT_LOW_THRESHOLD = parseFloat(process.env.HINT_LOW_THRESHOLD || '0.10'); // very low — any topical signal suffices
 
 /**
  * Initialize the local DistilBert embedder
@@ -190,7 +196,7 @@ function rollingAverage(existingEmbedding, newEmbedding, messageCount) {
  * This is the core auto-session logic
  */
 async function routeMessage(payload) {
-  const { text, threshold = SIMILARITY_THRESHOLD } = payload;
+  const { text, threshold = SIMILARITY_THRESHOLD, hintSessionId = null } = payload;
 
   if (!text) {
     throw new Error('text is required for session routing');
@@ -201,6 +207,85 @@ async function routeMessage(payload) {
 
     // 1. Generate embedding for the incoming message
     const messageEmbedding = await generateLocalEmbedding(text);
+
+    // ── Hint session fast-path ───────────────────────────────────────────────
+    // When a hintSessionId is provided (from the prior turn's resolvedSessionId),
+    // check if the message is a follow-up before running the full embedding search.
+    // Two conditions allow the hint to win:
+    //   (a) The hint session was active < HINT_RECENCY_MS ago (very recent — same conversation burst)
+    //   (b) The message is short (≤ HINT_SHORT_MESSAGE_WORDS words) AND has any topical signal
+    //       (similarity ≥ HINT_LOW_THRESHOLD) — catches "check for me now", "do it", "try again"
+    // Topic switches are safe: if the session is older AND the message has its own strong topic
+    // the normal embedding path below will create a new session as expected.
+    if (hintSessionId) {
+      try {
+        const hintSessions = await query(
+          `SELECT id, title, topic_embedding, message_count, last_activity_at
+           FROM conversation_sessions WHERE id = ?`,
+          [hintSessionId]
+        );
+        if (hintSessions.length > 0) {
+          const hint = hintSessions[0];
+          const hintAge = Date.now() - new Date(hint.last_activity_at).getTime();
+          const wordCount = text.trim().split(/\s+/).length;
+          let hintSimilarity = 0;
+
+          if (hint.topic_embedding) {
+            let hintVec;
+            try {
+              hintVec = typeof hint.topic_embedding === 'string'
+                ? JSON.parse(hint.topic_embedding)
+                : hint.topic_embedding;
+              hintSimilarity = cosineSimilarity(messageEmbedding, hintVec);
+            } catch (_) {}
+          }
+
+          const isVeryRecent = hintAge < HINT_RECENCY_MS;
+          const isShortFollowUp = wordCount <= HINT_SHORT_MESSAGE_WORDS && hintSimilarity >= HINT_LOW_THRESHOLD;
+
+          if (isVeryRecent || isShortFollowUp) {
+            console.log(`🔗 [SESSION-ROUTER] Hint match "${hint.title}" (age: ${Math.round(hintAge / 1000)}s, words: ${wordCount}, sim: ${hintSimilarity.toFixed(3)}, veryRecent: ${isVeryRecent})`);
+
+            // Update topic embedding with rolling average
+            let existingVec = null;
+            if (hint.topic_embedding) {
+              try {
+                existingVec = typeof hint.topic_embedding === 'string'
+                  ? JSON.parse(hint.topic_embedding)
+                  : hint.topic_embedding;
+              } catch (_) {}
+            }
+            const updatedEmbedding = rollingAverage(existingVec, messageEmbedding, parseInt(hint.message_count) || 1);
+            const topic = hint.title.replace(/ - \d{2}\/\d{2}\/\d{4}$/, '');
+            const newTitle = formatSessionTitle(topic);
+            const nowIso = new Date().toISOString();
+
+            await run(
+              `UPDATE conversation_sessions
+               SET topic_embedding = ?, title = ?, updated_at = ?, last_activity_at = ?, is_active = true
+               WHERE id = ?`,
+              [JSON.stringify(updatedEmbedding), newTitle, nowIso, nowIso, hint.id]
+            );
+            await run(
+              `UPDATE conversation_sessions SET is_active = false WHERE id != ? AND is_active = true`,
+              [hint.id]
+            );
+
+            return {
+              sessionId: hint.id,
+              action: 'hint_matched',
+              title: newTitle,
+              similarity: parseFloat(hintSimilarity.toFixed(3)),
+              threshold
+            };
+          } else {
+            console.log(`🔀 [SESSION-ROUTER] Hint rejected (age: ${Math.round(hintAge / 1000)}s > ${HINT_RECENCY_MS / 1000}s, words: ${wordCount}, sim: ${hintSimilarity.toFixed(3)}) — proceeding with embedding search`);
+          }
+        }
+      } catch (hintErr) {
+        console.warn('⚠️ [SESSION-ROUTER] Hint lookup failed (non-fatal):', hintErr.message);
+      }
+    }
 
     // 2. Get all non-stale sessions that have a topic_embedding
     const staleCutoff = new Date(Date.now() - STALE_DAYS * 24 * 60 * 60 * 1000).toISOString();
