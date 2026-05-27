@@ -111,11 +111,7 @@ async function addMessage(payload) {
       console.warn('⚠️ [MESSAGE] Embedding generation failed:', error.message);
     });
 
-    // Update session topic embedding asynchronously (non-blocking, uses local DistilBert)
-    updateSessionTopicEmbedding(sessionId, text).catch(error => {
-      console.warn('⚠️ [MESSAGE] Topic embedding update failed:', error.message);
-    });
-
+    
     return {
       messageId,
       message: {

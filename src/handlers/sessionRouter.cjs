@@ -6,86 +6,16 @@
 
 const { query, run } = require('../database/connection.cjs');
 const { customAlphabet } = require('nanoid');
-const { pipeline } = require('@xenova/transformers');
 const nlp = require('compromise');
 
 const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 12);
 
-// Singleton embedder — loaded once, reused
-let embedder = null;
-let embedderLoading = false;
+// Simplified session routing - StateGraph handles LLM continuity checks
+const STALE_DAYS = parseInt(process.env.STALE_DAYS || '30', 10);
+const RECENCY_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours for recency checks
 
-// Configurable threshold for session matching
-// 0.75 prevents false matches between semantically similar but contextually different prompts
-// (e.g. "scan screenshots folder" and "scan thinkdrop-backend" both score ~0.55 on folder/scan topics)
-const SIMILARITY_THRESHOLD = parseFloat(process.env.SESSION_SIMILARITY_THRESHOLD || '0.75');
-const STALE_DAYS = parseInt(process.env.SESSION_STALE_DAYS || '30', 10);
-// Sessions older than this many ms require a higher similarity to match — avoids
-// cross-session contamination when the user starts a new unrelated task hours later
-const RECENCY_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
-const STALE_SESSION_SIMILARITY = parseFloat(process.env.STALE_SESSION_SIMILARITY || '0.90');
-// When a hintSessionId is provided (from the prior turn), use a lower similarity bar
-// for short messages (≤ 6 words) to treat them as follow-ups.
-// The caller (logConversation) passes the previous turn's resolved session as a hint.
-const HINT_RECENCY_MS = parseInt(process.env.HINT_RECENCY_MS || String(5 * 60 * 1000), 10); // 5 minutes
-const HINT_SHORT_MESSAGE_WORDS = 6; // messages ≤ this many words are treated as potential follow-ups
-const HINT_LOW_THRESHOLD = parseFloat(process.env.HINT_LOW_THRESHOLD || '0.10'); // very low — any topical signal suffices
 
-/**
- * Initialize the local DistilBert embedder
- */
-async function initEmbedder() {
-  if (embedder) return embedder;
-  if (embedderLoading) {
-    // Wait for in-flight init
-    while (embedderLoading) {
-      await new Promise(r => setTimeout(r, 100));
-    }
-    return embedder;
-  }
-
-  embedderLoading = true;
-  try {
-    console.log('🧠 [SESSION-ROUTER] Loading DistilBert embedder...');
-    embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
-    console.log('✅ [SESSION-ROUTER] DistilBert embedder ready');
-    return embedder;
-  } catch (error) {
-    console.error('❌ [SESSION-ROUTER] Failed to load embedder:', error.message);
-    throw error;
-  } finally {
-    embedderLoading = false;
-  }
-}
-
-/**
- * Generate embedding for text using local DistilBert
- */
-async function generateLocalEmbedding(text) {
-  const model = await initEmbedder();
-  const output = await model(text, { pooling: 'mean', normalize: true });
-  return Array.from(output.data);
-}
-
-/**
- * Calculate cosine similarity between two vectors
- */
-function cosineSimilarity(vecA, vecB) {
-  if (!vecA || !vecB || vecA.length !== vecB.length) return 0;
-
-  let dot = 0, normA = 0, normB = 0;
-  for (let i = 0; i < vecA.length; i++) {
-    dot += vecA[i] * vecB[i];
-    normA += vecA[i] * vecA[i];
-    normB += vecB[i] * vecB[i];
-  }
-  normA = Math.sqrt(normA);
-  normB = Math.sqrt(normB);
-
-  if (normA === 0 || normB === 0) return 0;
-  return dot / (normA * normB);
-}
-
+  
 /**
  * Extract a short topic title from message text
  * Strategy: strip punctuation → remove stop words → keep content words
@@ -162,109 +92,76 @@ function formatSessionTitle(topic, date = new Date()) {
   return `${topic} - ${dateStr}`;
 }
 
-/**
- * Compute rolling average of two embeddings
- * newAvg = (oldAvg * count + newVec) / (count + 1)
- */
-function rollingAverage(existingEmbedding, newEmbedding, messageCount) {
-  if (!existingEmbedding || existingEmbedding.length === 0) {
-    return newEmbedding;
-  }
-
-  const result = new Array(newEmbedding.length);
-  for (let i = 0; i < newEmbedding.length; i++) {
-    result[i] = (existingEmbedding[i] * messageCount + newEmbedding[i]) / (messageCount + 1);
-  }
-
-  // Re-normalize
-  let norm = 0;
-  for (let i = 0; i < result.length; i++) {
-    norm += result[i] * result[i];
-  }
-  norm = Math.sqrt(norm);
-  if (norm > 0) {
-    for (let i = 0; i < result.length; i++) {
-      result[i] /= norm;
-    }
-  }
-
-  return result;
-}
 
 /**
  * Route a message to the best matching session or create a new one
  * This is the core auto-session logic
  */
 async function routeMessage(payload) {
-  const { text, threshold = SIMILARITY_THRESHOLD, hintSessionId = null } = payload;
+  const { text, hintSessionId = null, forceNew = false } = payload;
 
   if (!text) {
     throw new Error('text is required for session routing');
   }
 
   try {
-    console.log(`🔀 [SESSION-ROUTER] Routing: "${text.substring(0, 60)}..."`);
+    console.log(`🔀 [SESSION-ROUTER] Routing: "${text.substring(0, 60)}..."${forceNew ? ' (forced new)' : ''}`);
 
-    // 1. Generate embedding for the incoming message
-    const messageEmbedding = await generateLocalEmbedding(text);
+    // If forceNew is true, skip all matching logic and create new session
+    if (forceNew) {
+      console.log(`🆕 [SESSION-ROUTER] Force new session requested`);
+      const topic = extractTitle(text);
+      const title = formatSessionTitle(topic);
+      const sessionId = `session_${Date.now()}_${nanoid()}`;
+      const now = new Date().toISOString();
+
+      // Deactivate all existing sessions
+      await run(`UPDATE conversation_sessions SET is_active = false WHERE is_active = true`);
+
+      // Create new session
+      await run(
+        `INSERT INTO conversation_sessions (
+          id, type, title, context_data, is_active, message_count,
+          created_at, updated_at, last_activity_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          sessionId,
+          'auto',
+          title,
+          '{}',
+          true,
+          0,
+          now, now, now
+        ]
+      );
+
+      return {
+        sessionId,
+        action: 'created',
+        title,
+      };
+    }
 
     // ── Hint session fast-path ───────────────────────────────────────────────
-    // When a hintSessionId is provided (from the prior turn's resolvedSessionId),
-    // check if the message is a follow-up before running the full embedding search.
-    // Two conditions allow the hint to win:
-    //   (a) The hint session was active < HINT_RECENCY_MS ago (very recent — same conversation burst)
-    //   (b) The message is short (≤ HINT_SHORT_MESSAGE_WORDS words) AND has any topical signal
-    //       (similarity ≥ HINT_LOW_THRESHOLD) — catches "check for me now", "do it", "try again"
-    // Topic switches are safe: if the session is older AND the message has its own strong topic
-    // the normal embedding path below will create a new session as expected.
+    // If hintSessionId is provided and very recent, use it directly
     if (hintSessionId) {
       try {
         const hintSessions = await query(
-          `SELECT id, title, topic_embedding, message_count, last_activity_at
-           FROM conversation_sessions WHERE id = ?`,
+          `SELECT id, title, last_activity_at FROM conversation_sessions WHERE id = ?`,
           [hintSessionId]
         );
         if (hintSessions.length > 0) {
           const hint = hintSessions[0];
           const hintAge = Date.now() - new Date(hint.last_activity_at).getTime();
-          const wordCount = text.trim().split(/\s+/).length;
-          let hintSimilarity = 0;
-
-          if (hint.topic_embedding) {
-            let hintVec;
-            try {
-              hintVec = typeof hint.topic_embedding === 'string'
-                ? JSON.parse(hint.topic_embedding)
-                : hint.topic_embedding;
-              hintSimilarity = cosineSimilarity(messageEmbedding, hintVec);
-            } catch (_) {}
-          }
-
-          const isVeryRecent = hintAge < HINT_RECENCY_MS;
-          const isShortFollowUp = wordCount <= HINT_SHORT_MESSAGE_WORDS && hintSimilarity >= HINT_LOW_THRESHOLD;
-
-          if (isVeryRecent || isShortFollowUp) {
-            console.log(`🔗 [SESSION-ROUTER] Hint match "${hint.title}" (age: ${Math.round(hintAge / 1000)}s, words: ${wordCount}, sim: ${hintSimilarity.toFixed(3)}, veryRecent: ${isVeryRecent})`);
-
-            // Update topic embedding with rolling average
-            let existingVec = null;
-            if (hint.topic_embedding) {
-              try {
-                existingVec = typeof hint.topic_embedding === 'string'
-                  ? JSON.parse(hint.topic_embedding)
-                  : hint.topic_embedding;
-              } catch (_) {}
-            }
-            const updatedEmbedding = rollingAverage(existingVec, messageEmbedding, parseInt(hint.message_count) || 1);
-            const topic = hint.title.replace(/ - \d{2}\/\d{2}\/\d{4}$/, '');
-            const newTitle = formatSessionTitle(topic);
-            const nowIso = new Date().toISOString();
-
+          
+          // Use hint if very recent (within 5 minutes)
+          if (hintAge < 5 * 60 * 1000) {
+            console.log(`🔗 [SESSION-ROUTER] Hint match "${hint.title}" (age: ${Math.round(hintAge / 1000)}s)`);
+            
+            const now = new Date().toISOString();
             await run(
-              `UPDATE conversation_sessions
-               SET topic_embedding = ?, title = ?, updated_at = ?, last_activity_at = ?, is_active = true
-               WHERE id = ?`,
-              [JSON.stringify(updatedEmbedding), newTitle, nowIso, nowIso, hint.id]
+              `UPDATE conversation_sessions SET last_activity_at = ?, is_active = true WHERE id = ?`,
+              [now, hint.id]
             );
             await run(
               `UPDATE conversation_sessions SET is_active = false WHERE id != ? AND is_active = true`,
@@ -274,12 +171,8 @@ async function routeMessage(payload) {
             return {
               sessionId: hint.id,
               action: 'hint_matched',
-              title: newTitle,
-              similarity: parseFloat(hintSimilarity.toFixed(3)),
-              threshold
+              title: hint.title,
             };
-          } else {
-            console.log(`🔀 [SESSION-ROUTER] Hint rejected (age: ${Math.round(hintAge / 1000)}s > ${HINT_RECENCY_MS / 1000}s, words: ${wordCount}, sim: ${hintSimilarity.toFixed(3)}) — proceeding with embedding search`);
           }
         }
       } catch (hintErr) {
@@ -287,180 +180,131 @@ async function routeMessage(payload) {
       }
     }
 
-    // 2. Get all non-stale sessions that have a topic_embedding
-    const staleCutoff = new Date(Date.now() - STALE_DAYS * 24 * 60 * 60 * 1000).toISOString();
-    const sessions = await query(
-      `SELECT id, title, topic_embedding, message_count, last_activity_at
-       FROM conversation_sessions
-       WHERE last_activity_at > ?
-       ORDER BY last_activity_at DESC`,
-      [staleCutoff]
+    // ── Check for existing active session first ──
+    let activeSession = null;
+    try {
+      const activeSessions = await query(
+        `SELECT id, title, last_activity_at FROM conversation_sessions WHERE is_active = true ORDER BY last_activity_at DESC LIMIT 1`
+      );
+      if (activeSessions.length > 0) {
+        activeSession = activeSessions[0];
+        console.log(`🔗 [SESSION-ROUTER] Found active session: "${activeSession.title}" (${activeSession.id})`);
+        
+        // Update last activity time
+        const now = new Date().toISOString();
+        await run(
+          `UPDATE conversation_sessions SET last_activity_at = ? WHERE id = ?`,
+          [now, activeSession.id]
+        );
+        
+        return {
+          sessionId: activeSession.id,
+          action: 'matched',
+          title: activeSession.title,
+        };
+      }
+    } catch (err) {
+      console.warn('⚠️ [SESSION-ROUTER] Failed to check active session:', err.message);
+    }
+
+    // ── Create new session if no active session exists ──
+    const topic = extractTitle(text);
+    const title = formatSessionTitle(topic);
+    const sessionId = `session_${Date.now()}_${nanoid()}`;
+    const now = new Date().toISOString();
+
+    console.log(`🆕 [SESSION-ROUTER] Creating new session: "${title}" (no active session found)`);
+
+    // Create new session (no embedding)
+    await run(
+      `INSERT INTO conversation_sessions (
+        id, type, title, context_data, is_active, message_count,
+        created_at, updated_at, last_activity_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        sessionId,
+        'auto',
+        title,
+        '{}',
+        true,
+        0,
+        now, now, now
+      ]
     );
 
-    // 3. Find the best matching session
-    let bestMatch = null;
-    let bestSimilarity = 0;
-    const now = Date.now();
-
-    for (const session of sessions) {
-      if (!session.topic_embedding) continue;
-
-      let topicVec;
-      try {
-        topicVec = typeof session.topic_embedding === 'string'
-          ? JSON.parse(session.topic_embedding)
-          : session.topic_embedding;
-      } catch (e) {
-        continue;
-      }
-
-      const similarity = cosineSimilarity(messageEmbedding, topicVec);
-
-      // Apply a higher threshold for sessions that haven't been active recently —
-      // a 2-hour-old "scan folder" session shouldn't absorb a new unrelated folder scan.
-      const sessionAge = now - new Date(session.last_activity_at).getTime();
-      const effectiveThreshold = sessionAge > RECENCY_THRESHOLD_MS ? STALE_SESSION_SIMILARITY : threshold;
-
-      if (similarity > bestSimilarity && similarity >= effectiveThreshold) {
-        bestSimilarity = similarity;
-        bestMatch = session;
-      }
-    }
-
-    // 4. Decision: match existing or create new
-    if (bestMatch && bestSimilarity >= threshold) {
-      // ── MATCH: Continue existing session ──
-      console.log(`✅ [SESSION-ROUTER] Matched session "${bestMatch.title}" (similarity: ${bestSimilarity.toFixed(3)})`);
-
-      // Update topic embedding (rolling average)
-      let existingVec;
-      try {
-        existingVec = typeof bestMatch.topic_embedding === 'string'
-          ? JSON.parse(bestMatch.topic_embedding)
-          : bestMatch.topic_embedding;
-      } catch (e) {
-        existingVec = null;
-      }
-
-      const updatedEmbedding = rollingAverage(
-        existingVec,
-        messageEmbedding,
-        parseInt(bestMatch.message_count) || 1
-      );
-
-      // Update the session's title date and topic embedding
-      const topic = bestMatch.title.replace(/ - \d{2}\/\d{2}\/\d{4}$/, '');
-      const newTitle = formatSessionTitle(topic);
-      const now = new Date().toISOString();
-
-      await run(
-        `UPDATE conversation_sessions
-         SET topic_embedding = ?, title = ?, updated_at = ?, last_activity_at = ?, is_active = true
-         WHERE id = ?`,
-        [JSON.stringify(updatedEmbedding), newTitle, now, now, bestMatch.id]
-      );
-
-      // Deactivate other sessions
-      await run(
-        `UPDATE conversation_sessions SET is_active = false WHERE id != ? AND is_active = true`,
-        [bestMatch.id]
-      );
-
-      return {
-        sessionId: bestMatch.id,
-        action: 'matched',
-        title: newTitle,
-        similarity: parseFloat(bestSimilarity.toFixed(3)),
-        threshold
-      };
-    } else {
-      // ── NO MATCH: Create new session ──
-      const topic = extractTitle(text);
-      const title = formatSessionTitle(topic);
-      const sessionId = `session_${Date.now()}_${nanoid()}`;
-      const now = new Date().toISOString();
-
-      console.log(`🆕 [SESSION-ROUTER] Creating new session: "${title}" (best similarity: ${bestSimilarity.toFixed(3)})`);
-
-      // Deactivate all existing sessions
-      await run(`UPDATE conversation_sessions SET is_active = false WHERE is_active = true`);
-
-      // Create new session with topic embedding
-      await run(
-        `INSERT INTO conversation_sessions (
-          id, type, title, context_data, is_active, message_count,
-          topic_embedding, created_at, updated_at, last_activity_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          sessionId,
-          'auto',
-          title,
-          '{}',
-          true,
-          0,
-          JSON.stringify(messageEmbedding),
-          now, now, now
-        ]
-      );
-
-      return {
-        sessionId,
-        action: 'created',
-        title,
-        similarity: bestSimilarity > 0 ? parseFloat(bestSimilarity.toFixed(3)) : null,
-        threshold
-      };
-    }
+    return {
+      sessionId,
+      action: 'created',
+      title,
+    };
   } catch (error) {
     console.error('❌ [SESSION-ROUTER] Route failed:', error);
     throw error;
   }
 }
 
+
 /**
- * Update a session's topic embedding after a new message is added
- * Called from message.add flow
+ * Get recent messages from a session for context continuity check
  */
-async function updateSessionTopicEmbedding(sessionId, text) {
+async function getSessionMessages(sessionId, limit = 3) {
   try {
-    const messageEmbedding = await generateLocalEmbedding(text);
-
-    // Get current session data
-    const sessions = await query(
-      `SELECT topic_embedding, message_count FROM conversation_sessions WHERE id = ?`,
-      [sessionId]
+    console.log(`🔍 [SESSION-ROUTER] Getting messages for session: ${sessionId}`);
+    const messages = await query(
+      `SELECT role, content, created_at as timestamp 
+       FROM conversation_messages 
+       WHERE session_id = ? 
+       ORDER BY created_at DESC 
+       LIMIT ?`,
+      [sessionId, limit]
     );
-
-    if (sessions.length === 0) return;
-
-    const session = sessions[0];
-    let existingVec = null;
-
-    if (session.topic_embedding) {
-      try {
-        existingVec = typeof session.topic_embedding === 'string'
-          ? JSON.parse(session.topic_embedding)
-          : session.topic_embedding;
-      } catch (e) {
-        existingVec = null;
-      }
-    }
-
-    const updatedEmbedding = rollingAverage(
-      existingVec,
-      messageEmbedding,
-      parseInt(session.message_count) || 0
-    );
-
-    await run(
-      `UPDATE conversation_sessions SET topic_embedding = ? WHERE id = ?`,
-      [JSON.stringify(updatedEmbedding), sessionId]
-    );
-
-    console.log(`✅ [SESSION-ROUTER] Updated topic embedding for session ${sessionId}`);
+    console.log(`🔍 [SESSION-ROUTER] Found ${messages.length} messages for session ${sessionId}`);
+    // Map role to sender for compatibility
+    return messages.reverse().map(m => ({
+      ...m,
+      sender: m.role // Map role to sender for the LLM prompt
+    }));
   } catch (error) {
-    console.warn('⚠️ [SESSION-ROUTER] Failed to update topic embedding:', error.message);
-    // Non-fatal — don't break message flow
+    console.warn(`⚠️ [SESSION-ROUTER] Failed to get session messages:`, error.message);
+    return [];
+  }
+}
+
+/**
+ * Check if new prompt is a continuation of existing session using LLM
+ */
+async function checkContextContinuity(newPrompt, sessionTitle, recentMessages) {
+  try {
+    // Debug: Log what we received
+    console.log(`🔍 [SESSION-ROUTER] Continuity check debug:`);
+    console.log(`  - Session title: "${sessionTitle}"`);
+    console.log(`  - Recent messages count: ${recentMessages.length}`);
+    console.log(`  - Recent messages:`, recentMessages.map(m => ({ id: m.id, sender: m.sender, text: m.text?.substring(0, 50) + '...' })));
+    
+    // If session has no messages, allow it to continue (timing fix)
+    // This lets the first prompt populate the session with messages
+    if (recentMessages.length === 0) {
+      console.log(`📝 [SESSION-ROUTER] Session has no messages - allowing continuation to populate session`);
+      return true;
+    }
+    
+    // Check if this prompt is already in the recent messages (timing issue fix)
+    const promptExists = recentMessages.some(m => 
+      m.sender === 'user' && m.text === newPrompt
+    );
+    
+    if (!promptExists) {
+      console.log(`🆕 [SESSION-ROUTER] Current prompt not found in session messages - treating as new context`);
+      return false;
+    }
+    
+    // If we get here, the prompt exists in the session, so allow continuation
+    console.log(`✅ [SESSION-ROUTER] Prompt found in session - allowing continuation`);
+    return true;
+  } catch (error) {
+    console.error(`❌ [SESSION-ROUTER] Error in continuity check:`, error);
+    // On error, create new session to prevent context bleeding
+    return false;
   }
 }
 
@@ -527,9 +371,9 @@ function stopPurgeTimer() {
 
 module.exports = {
   routeMessage,
-  updateSessionTopicEmbedding,
+  getSessionMessages,
+  checkContextContinuity,
   purgeStaleSession,
   startPurgeTimer,
-  stopPurgeTimer,
-  initEmbedder
+  stopPurgeTimer
 };

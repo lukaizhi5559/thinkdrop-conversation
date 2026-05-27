@@ -13,10 +13,11 @@ const { initializeDatabase } = require('./database/connection.cjs');
 const sessionRoutes = require('./routes/sessions.cjs');
 const messageRoutes = require('./routes/messages.cjs');
 const { authenticateRequest } = require('./middleware/auth.cjs');
-const { startPurgeTimer, stopPurgeTimer, initEmbedder } = require('./handlers/sessionRouter.cjs');
+const { startPurgeTimer, stopPurgeTimer } = require('./handlers/sessionRouter.cjs');
 
 const app = express();
 const PORT = process.env.PORT || 3004;
+
 
 // Middleware
 app.use(cors());
@@ -85,11 +86,6 @@ async function start() {
 
     // Start stale session purge timer (every 30 min)
     startPurgeTimer();
-
-    // Pre-load DistilBert embedder in background (non-blocking)
-    initEmbedder().catch(err => {
-      console.warn('⚠️ [CONVERSATION-SERVICE] Embedder pre-load failed:', err.message);
-    });
     
     app.listen(PORT, () => {
       console.log(`\n✅ [CONVERSATION-SERVICE] Running on port ${PORT}`);
