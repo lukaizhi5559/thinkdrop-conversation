@@ -6,7 +6,7 @@
 const express = require('express');
 const { validateMCPRequest, createMCPResponse } = require('../middleware/validation.cjs');
 const sessionHandlers = require('../handlers/sessionHandlers.cjs');
-const { routeMessage } = require('../handlers/sessionRouter.cjs');
+const { routeMessage, updateSessionTopicEmbedding, searchSemanticSession } = require('../handlers/sessionRouter.cjs');
 
 const router = express.Router();
 
@@ -98,6 +98,36 @@ router.post('/session.route', async (req, res) => {
     res.json(createMCPResponse(requestId, 'session.route', true, result));
   } catch (error) {
     res.status(500).json(createMCPResponse(req.mcpRequest.requestId, 'session.route', false, null, error.message));
+  }
+});
+
+// Session store topic embedding — called after a pipeline run to index the session
+router.post('/session.storeEmbedding', async (req, res) => {
+  try {
+    const { requestId, payload } = req.mcpRequest;
+    const { sessionId, text } = payload || {};
+    if (!sessionId || !text) {
+      return res.status(400).json(createMCPResponse(requestId, 'session.storeEmbedding', false, null, 'sessionId and text are required'));
+    }
+    await updateSessionTopicEmbedding(sessionId, text);
+    res.json(createMCPResponse(requestId, 'session.storeEmbedding', true, { sessionId, ok: true }));
+  } catch (error) {
+    res.status(500).json(createMCPResponse(req.mcpRequest?.requestId, 'session.storeEmbedding', false, null, error.message));
+  }
+});
+
+// Session semantic search — find the best matching past session for a new prompt
+router.post('/session.searchSemantic', async (req, res) => {
+  try {
+    const { requestId, payload } = req.mcpRequest;
+    const { text, threshold } = payload || {};
+    if (!text) {
+      return res.status(400).json(createMCPResponse(requestId, 'session.searchSemantic', false, null, 'text is required'));
+    }
+    const result = await searchSemanticSession(text, threshold);
+    res.json(createMCPResponse(requestId, 'session.searchSemantic', true, result || { sessionId: null, action: 'no_match' }));
+  } catch (error) {
+    res.status(500).json(createMCPResponse(req.mcpRequest?.requestId, 'session.searchSemantic', false, null, error.message));
   }
 });
 

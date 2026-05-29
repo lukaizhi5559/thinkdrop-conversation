@@ -7,6 +7,7 @@
 const { query, run } = require('../database/connection.cjs');
 const { customAlphabet } = require('nanoid');
 const nlp = require('compromise');
+const { generateEmbedding, cosineSimilarity } = require('./semanticSearchHandler.cjs');
 
 const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 12);
 
@@ -309,6 +310,85 @@ async function checkContextContinuity(newPrompt, sessionTitle, recentMessages) {
 }
 
 /**
+ * Store a topic embedding for a session (called on session close / pipeline:done)
+ * Text should be a short summary: intent + answer excerpt
+ */
+async function updateSessionTopicEmbedding(sessionId, text) {
+  if (!sessionId || !text) return;
+  try {
+    const embedding = await generateEmbedding(text);
+    await run(
+      `UPDATE conversation_sessions SET topic_embedding = ? WHERE id = ?`,
+      [JSON.stringify(embedding), sessionId]
+    );
+    console.log(`✅ [SESSION-ROUTER] Stored topic embedding for session ${sessionId}`);
+  } catch (error) {
+    console.warn(`⚠️ [SESSION-ROUTER] Failed to store topic embedding for ${sessionId}:`, error.message);
+  }
+}
+
+/**
+ * Semantic search across all sessions by topic embedding similarity.
+ * Returns the best matching session above the threshold, or null.
+ */
+async function searchSemanticSession(text, threshold = 0.75) {
+  if (!text) return null;
+  try {
+    const queryEmbedding = await generateEmbedding(text);
+
+    // Fetch all sessions that have a topic_embedding
+    const sessions = await query(
+      `SELECT id, title, topic_embedding, last_activity_at, context_data
+       FROM conversation_sessions
+       WHERE topic_embedding IS NOT NULL
+       ORDER BY last_activity_at DESC`
+    );
+
+    if (sessions.length === 0) return null;
+
+    let bestMatch = null;
+    let bestScore = -1;
+
+    for (const session of sessions) {
+      try {
+        const embedding = typeof session.topic_embedding === 'string'
+          ? JSON.parse(session.topic_embedding)
+          : session.topic_embedding;
+
+        if (!Array.isArray(embedding) || embedding.length === 0) continue;
+
+        const score = cosineSimilarity(queryEmbedding, embedding);
+        if (score > bestScore) {
+          bestScore = score;
+          bestMatch = { ...session, score };
+        }
+      } catch (_) {}
+    }
+
+    if (bestMatch && bestScore >= threshold) {
+      console.log(`🔍 [SESSION-ROUTER] Semantic match: "${bestMatch.title}" (score: ${bestScore.toFixed(3)})`);
+      // Reactivate matched session
+      const now = new Date().toISOString();
+      await run(`UPDATE conversation_sessions SET is_active = false WHERE is_active = true`);
+      await run(`UPDATE conversation_sessions SET is_active = true, last_activity_at = ? WHERE id = ?`, [now, bestMatch.id]);
+      return {
+        sessionId: bestMatch.id,
+        title: bestMatch.title,
+        score: bestScore,
+        action: 'semantic_matched',
+        contextData: JSON.parse(bestMatch.context_data || '{}'),
+      };
+    }
+
+    console.log(`🔍 [SESSION-ROUTER] No semantic match above threshold ${threshold} (best: ${bestScore.toFixed(3)})`);
+    return null;
+  } catch (error) {
+    console.warn(`⚠️ [SESSION-ROUTER] Semantic session search failed:`, error.message);
+    return null;
+  }
+}
+
+/**
  * Purge stale sessions (no activity for STALE_DAYS days)
  */
 async function purgeStaleSession() {
@@ -373,6 +453,8 @@ module.exports = {
   routeMessage,
   getSessionMessages,
   checkContextContinuity,
+  updateSessionTopicEmbedding,
+  searchSemanticSession,
   purgeStaleSession,
   startPurgeTimer,
   stopPurgeTimer

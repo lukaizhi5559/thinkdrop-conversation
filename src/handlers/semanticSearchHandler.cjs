@@ -203,5 +203,6 @@ async function storeMessageEmbedding(messageId, text) {
 module.exports = {
   searchMessages,
   storeMessageEmbedding,
-  generateEmbedding
+  generateEmbedding,
+  cosineSimilarity
 };

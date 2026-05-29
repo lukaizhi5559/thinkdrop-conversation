@@ -48,6 +48,8 @@ app.get('/info', (req, res) => {
       'session.getActive',
       'session.switch',
       'session.route',
+      'session.storeEmbedding',
+      'session.searchSemantic',
       'message.add',
       'message.list',
       'message.get',
