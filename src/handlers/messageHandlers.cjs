@@ -305,29 +305,38 @@ async function deleteMessage(payload) {
 }
 
 /**
- * List messages across all sessions within a date range (cross-session history query)
+ * List messages across all sessions (cross-session history query).
+ * With startDate/endDate: messages within the range, ordered by sortOrder
+ * (default ASC to preserve chronological-context callers).
+ * Without dates: the newest `limit` messages across ALL sessions (DESC),
+ * backed by the created_at index — cheap regardless of table size.
  */
 async function listMessagesByDate(payload) {
   const {
     startDate,
     endDate,
     limit = 50,
+    sortOrder,
     userId
   } = payload;
 
-  if (!startDate || !endDate) {
-    throw new Error('startDate and endDate are required');
-  }
-
   try {
-    const messages = await query(
-      `SELECT cm.id, cm.session_id, cm.content, cm.role, cm.created_at, cm.metadata
-       FROM conversation_messages cm
-       WHERE cm.created_at >= ? AND cm.created_at <= ?
-       ORDER BY cm.created_at ASC
-       LIMIT ?`,
-      [startDate, endDate, limit]
-    );
+    let sql = `SELECT cm.id, cm.session_id, cm.content, cm.role, cm.created_at, cm.metadata
+       FROM conversation_messages cm`;
+    const params = [];
+    if (startDate && endDate) {
+      sql += `\n       WHERE cm.created_at >= ? AND cm.created_at <= ?`;
+      params.push(startDate, endDate);
+    }
+    // When no dates are given the caller wants the newest messages across all
+    // sessions (cross-session recall); when a range is given default to ASC
+    // for chronological context unless sortOrder says otherwise.
+    const dir = (!startDate || !endDate) ? 'DESC'
+      : (sortOrder === 'DESC' ? 'DESC' : 'ASC');
+    sql += `\n       ORDER BY cm.created_at ${dir}\n       LIMIT ?`;
+    params.push(limit);
+
+    const messages = await query(sql, params);
 
     const parsedMessages = messages.map(msg => ({
       id: msg.id,
