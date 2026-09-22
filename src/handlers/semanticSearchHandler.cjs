@@ -140,6 +140,7 @@ async function searchMessages(payload) {
     minSimilarity = 0.5,
     includeRecent = 3, // Always include N most recent messages (single-session mode)
     searchAllSessions = false,
+    scanAllSessions = false, // bypass tier-1 topic filter entirely (recall queries)
     sessionFilterThreshold = 0.15, // two-tier filter: skip sessions below this score
     maxScan = parseInt(process.env.SEMANTIC_MAX_SCAN || '5000', 10),
   } = payload;
@@ -161,10 +162,19 @@ async function searchMessages(payload) {
     if (searchAllSessions) {
       // Tier 1: Compare query embedding vs each session's topic_embedding.
       // Always include the current session (if provided) regardless of score.
+      //
+      // scanAllSessions (recall queries): skip the topic filter entirely and
+      // scan every session. topic_embedding is seeded once from a session's
+      // first message and never updated, so topical drift (or a NULL
+      // embedding) silently excludes sessions that actually contain the
+      // answer — observed: "dentist appointment" scanned 0 of 18 sessions.
       const sessions = await query(
-        `SELECT id, title, topic_embedding FROM conversation_sessions
-         WHERE topic_embedding IS NOT NULL
-         ORDER BY last_activity_at DESC`
+        scanAllSessions
+          ? `SELECT id, title, topic_embedding FROM conversation_sessions
+             ORDER BY last_activity_at DESC`
+          : `SELECT id, title, topic_embedding FROM conversation_sessions
+             WHERE topic_embedding IS NOT NULL
+             ORDER BY last_activity_at DESC`
       );
 
       const sessionsToScan = [];
@@ -174,6 +184,10 @@ async function searchMessages(payload) {
       let skipped = 0;
       for (const s of sessions) {
         if (s.id === sessionId) continue;
+        if (scanAllSessions) {
+          sessionsToScan.push({ id: s.id, title: s.title || s.id });
+          continue;
+        }
         let emb = null;
         try {
           emb = typeof s.topic_embedding === 'string'
@@ -188,7 +202,24 @@ async function searchMessages(payload) {
           skipped++;
         }
       }
-      console.log(`🔍 [SEMANTIC] Tier 1: scanning ${sessionsToScan.length} sessions (skipped ${skipped} below ${sessionFilterThreshold})`);
+      console.log(`🔍 [SEMANTIC] Tier 1: scanning ${sessionsToScan.length} sessions (skipped ${skipped} below ${sessionFilterThreshold}${scanAllSessions ? ', scanAllSessions' : ''})`);
+
+      // Fail-safe for non-flag callers: if the topic filter excluded every
+      // session, scan them all anyway — a zero-session scan is a guaranteed
+      // miss and strictly worse than a bounded full scan. Re-query without
+      // the NOT NULL filter so embedding-less sessions are included too.
+      if (!scanAllSessions && sessionsToScan.length <= (sessionId ? 1 : 0)) {
+        const allSessions = await query(
+          `SELECT id, title FROM conversation_sessions ORDER BY last_activity_at DESC`
+        );
+        if (allSessions.length > sessionsToScan.length) {
+          console.log(`⚠️ [SEMANTIC] Tier 1 selected no sessions — falling back to scanning all ${allSessions.length}`);
+          for (const s of allSessions) {
+            if (sessionsToScan.some(x => x.id === s.id)) continue;
+            sessionsToScan.push({ id: s.id, title: s.title || s.id });
+          }
+        }
+      }
 
       // Tier 2: Full message scan only on sessions that passed tier 1.
       let allMatches = [];
