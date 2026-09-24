@@ -352,7 +352,11 @@ async function routeMessage(payload) {
     }
 
     // ── Check for existing active session first ──
-    // Rotation triggers: (1) message cap (primary), (2) inactivity >2h, (3) age >24h
+    // Rotation triggers: (1) message cap (primary), (2) inactivity >2h.
+    // Age is NOT a rotation trigger: semantic re-activation (below) deliberately
+    // revives old sessions, and a created_at-based age rule would rotate every
+    // reactivated session one message after revival (observed: a follow-up 2 min
+    // after re-activation landed in a brand-new empty session and lost context).
     let activeSession = null;
     let deactivatedSessionId = null; // captured when we rotate, to exclude from semantic re-activation
     try {
@@ -367,10 +371,13 @@ async function routeMessage(payload) {
         const inactivityMs = nowMs - lastActivityMs;
         const ageMs = nowMs - createdAtMs;
 
-        // Time-based fallback triggers
+        // Time-based fallback trigger: inactivity only. A hard created_at age
+        // bound is opt-in via MAX_SESSION_AGE_MS (0 = disabled) — any fixed age
+        // breaks re-activation of sessions older than the bound.
         const STALE_SESSION_MS = 2 * 60 * 60 * 1000;      // 2 hours inactivity
-        const MAX_SESSION_AGE_MS = 24 * 60 * 60 * 1000;   // 24 hours max age
-        const staleByTime = inactivityMs > STALE_SESSION_MS || ageMs > MAX_SESSION_AGE_MS;
+        const MAX_SESSION_AGE_MS = parseInt(process.env.MAX_SESSION_AGE_MS || '0', 10);
+        const staleByTime = inactivityMs > STALE_SESSION_MS ||
+          (MAX_SESSION_AGE_MS > 0 && ageMs > MAX_SESSION_AGE_MS);
 
         // Message-count cap (primary rotation trigger — ~3-4 months per session)
         const staleByCap = (activeSession.message_count || 0) >= MAX_SESSION_MESSAGES;
