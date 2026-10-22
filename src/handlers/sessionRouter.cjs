@@ -256,6 +256,57 @@ async function _generateAndStoreSessionSummary(sessionId) {
   }
 }
 
+/**
+ * Summarize + deactivate a session (shared by the time/cap rotation and the
+ * topic-boundary rotation paths).
+ */
+async function _rotateSession(session) {
+  console.log(`🔄 [SESSION-ROUTER] Rotating session "${session.title}" (${session.id})`);
+  await _generateAndStoreSessionSummary(session.id).catch(err =>
+    console.warn('⚠️ [SESSION-ROUTER] Session summary failed (non-fatal):', err.message)
+  );
+  await run(`UPDATE conversation_sessions SET is_active = false WHERE id = ?`, [session.id]);
+}
+
+// Prompts that plausibly continue the current conversation vs. describe new
+// work. Short replies and verb-free phrases are context-dependent — their
+// embeddings can't be trusted to signal a topic change, so only longer,
+// action-carrying prompts get the embedding check.
+const _ACTION_WORD_RE = /\b(?:open|show|find|search|get|fetch|list|create|build|make|write|draft|generate|send|add|commit|push|stage|deploy|install|delete|remove|rename|move|copy|organize|update|fix|scan|check|review|edit|run|start|plan|schedule|remind|text|call|email|post|tweet|download|upload|play|watch|read|summarize|extract|convert|compare|analyze)\b/i;
+const _NEW_TASK_MIN_WORDS = 7;
+
+/**
+ * Topic-boundary check: does this prompt describe work unrelated to the
+ * active session's seeded topic? Only fires for new-task-shaped prompts —
+ * short continuations ("yes", "the third one") reuse unconditionally because
+ * their embeddings look unrelated to everything.
+ *
+ * Fail-open: missing topic_embedding or an embedding error → reuse.
+ */
+async function _isTopicBoundary(text, activeSession) {
+  try {
+    if (!activeSession || !activeSession.topic_embedding) return false;
+    const t = String(text || '').trim();
+    const words = t.split(/\s+/).length;
+    if (words < _NEW_TASK_MIN_WORDS || !_ACTION_WORD_RE.test(t)) return false;
+    const sessionEmbedding = typeof activeSession.topic_embedding === 'string'
+      ? JSON.parse(activeSession.topic_embedding)
+      : activeSession.topic_embedding;
+    if (!Array.isArray(sessionEmbedding) || sessionEmbedding.length === 0) return false;
+    const queryEmbedding = await generateEmbedding(t);
+    if (!Array.isArray(queryEmbedding) || queryEmbedding.length === 0) return false;
+    const score = cosineSimilarity(queryEmbedding, sessionEmbedding);
+    if (score < SESSION_MATCH_THRESHOLD) {
+      console.log(`🧭 [SESSION-ROUTER] Topic boundary — score ${score.toFixed(3)} < ${SESSION_MATCH_THRESHOLD} for "${t.slice(0, 50)}"`);
+      return true;
+    }
+    return false;
+  } catch (err) {
+    console.warn('⚠️ [SESSION-ROUTER] Topic-boundary check failed (non-fatal):', err.message);
+    return false;
+  }
+}
+
 async function routeMessage(payload) {
   const { text, hintSessionId = null, forceNew = false } = payload;
 
@@ -383,15 +434,17 @@ async function routeMessage(payload) {
         const staleByCap = (activeSession.message_count || 0) >= MAX_SESSION_MESSAGES;
 
         if (staleByTime || staleByCap) {
-          console.log(`🔄 [SESSION-ROUTER] Rotating session "${activeSession.title}": ${staleByTime ? 'time' : ''} ${staleByCap ? `cap(${activeSession.message_count}>=${MAX_SESSION_MESSAGES})` : ''}`.trim());
-          // Generate + store session summary embedding BEFORE deactivating
-          await _generateAndStoreSessionSummary(activeSession.id).catch(err =>
-            console.warn('⚠️ [SESSION-ROUTER] Session summary failed (non-fatal):', err.message)
-          );
-          // Deactivate old session
-          await run(`UPDATE conversation_sessions SET is_active = false WHERE id = ?`, [activeSession.id]);
+          await _rotateSession(activeSession);
           deactivatedSessionId = activeSession.id; // exclude from semantic re-activation below
           activeSession = null; // fall through to semantic re-activation / new session
+        } else if (await _isTopicBoundary(text, activeSession)) {
+          // Topic boundary — the prompt describes new work unrelated to the
+          // session's seeded topic ("pictures of Batman" after a git plan).
+          // Rotate rather than pollute one mega-session with every request.
+          console.log(`🔄 [SESSION-ROUTER] Topic boundary — rotating "${activeSession.title}" for new-task prompt`);
+          await _rotateSession(activeSession);
+          deactivatedSessionId = activeSession.id;
+          activeSession = null;
         } else {
           // Same topic, fresh session → reuse
           console.log(`🔗 [SESSION-ROUTER] Reusing active session: "${activeSession.title}" (${activeSession.id}, ${activeSession.message_count || 0} msgs)`);
