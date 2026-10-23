@@ -359,10 +359,38 @@ async function listMessagesByDate(payload) {
   }
 }
 
+/**
+ * Per-day message counts for the conversation-history timeline.
+ * Buckets conversation_messages by calendar day over an optional range —
+ * one indexed scan, cheap regardless of table size.
+ * Returns { buckets: [{day:'YYYY-MM-DD', count}] } oldest → newest.
+ */
+async function messageHistogram(payload) {
+  const { startDate, endDate, bucket = 'day' } = payload || {};
+  try {
+    const FMT = { minute: '%Y-%m-%dT%H:%M', hour: '%Y-%m-%dT%H:00', day: '%Y-%m-%d', month: '%Y-%m' };
+    const fmt = FMT[bucket] || FMT.day;
+    let sql = `SELECT strftime(created_at, '${fmt}') AS day, COUNT(*) AS count
+       FROM conversation_messages`;
+    const params = [];
+    if (startDate && endDate) {
+      sql += `\n       WHERE created_at >= ? AND created_at <= ?`;
+      params.push(startDate, endDate);
+    }
+    sql += `\n       GROUP BY day\n       ORDER BY day ASC`;
+    const rows = await query(sql, params);
+    return { buckets: rows.map(r => ({ day: r.day, count: Number(r.count) })) };
+  } catch (error) {
+    console.error('❌ [MESSAGE] histogram failed:', error);
+    throw error;
+  }
+}
+
 module.exports = {
   addMessage,
   listMessages,
   listMessagesByDate,
+  messageHistogram,
   getMessage,
   updateMessage,
   deleteMessage

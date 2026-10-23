@@ -46,6 +46,17 @@ router.post('/message.listByDate', async (req, res) => {
   }
 });
 
+// Message histogram — per-day message counts for the conversation timeline
+router.post('/message.histogram', async (req, res) => {
+  try {
+    const { requestId, payload } = req.mcpRequest;
+    const result = await messageHandlers.messageHistogram(payload);
+    res.json(createMCPResponse(requestId, 'message.histogram', true, result));
+  } catch (error) {
+    res.status(500).json(createMCPResponse(req.mcpRequest.requestId, 'message.histogram', false, null, error.message));
+  }
+});
+
 // Message semantic search
 router.post('/message.search', async (req, res) => {
   try {
