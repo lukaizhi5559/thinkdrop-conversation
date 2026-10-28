@@ -19,7 +19,14 @@ const RECENCY_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours for recency checks
 // Sessions auto-rotate when they hit MAX_SESSION_MESSAGES (~3-4 months per session).
 // This enables the two-tier semantic search (session-level filter → message-level scan).
 const MAX_SESSION_MESSAGES = parseInt(process.env.MAX_SESSION_MESSAGES || '2000', 10);
-const SESSION_MATCH_THRESHOLD = 0.35;  // semantic re-activation threshold for historical sessions
+// Semantic re-activation threshold for historical sessions. 0.35 pulled a
+// month-old 132-msg session ("Time go around earth traveling") into every
+// classify on a 0.561 match for "Describe what's on my screen" — screen and
+// self-contained prompts should never resurrect ancient context.
+const SESSION_MATCH_THRESHOLD = 0.60;
+// Prompts that are self-contained (their referent is the screen/selection
+// itself) must not semantically re-activate an old session.
+const SELF_CONTAINED_RE = /describe what'?s on (?:my|the) screen|what'?s on (?:my|the) screen|fresh (?:scan|check|look)|what am i looking at|read (?:my|the) screen/i;
 const SESSION_FILTER_THRESHOLD = 0.15; // two-tier filter: skip sessions below this score
 
 // LLM session summary (generated on rotation, ~4 LLM calls per session)
@@ -464,7 +471,9 @@ async function routeMessage(payload) {
     // re-activate the session we just rotated away from.
     try {
       const excludeId = deactivatedSessionId;
-      const semanticMatch = await searchSemanticSession(text, SESSION_MATCH_THRESHOLD, excludeId);
+      const semanticMatch = SELF_CONTAINED_RE.test(text || '')
+        ? null
+        : await searchSemanticSession(text, SESSION_MATCH_THRESHOLD, excludeId);
       if (semanticMatch) {
         console.log(`🔗 [SESSION-ROUTER] Re-activated session: "${semanticMatch.title}" (score: ${semanticMatch.score.toFixed(3)})`);
         return { sessionId: semanticMatch.sessionId, action: 'semantic_matched', title: semanticMatch.title };

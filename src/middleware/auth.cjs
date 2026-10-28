@@ -12,7 +12,8 @@ function authenticateRequest(req, res, next) {
   const apiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
   
   // Debug: Log incoming requests
-  console.log('🔍 [CONVERSATION-AUTH] Received API key:', apiKey ? apiKey.substring(0, 10) + '...' : 'MISSING');
+  // No key logging — a request path printing credential material (even a
+  // prefix) every call leaks into the shared log file.
   
   if (!apiKey) {
     return res.status(401).json({
